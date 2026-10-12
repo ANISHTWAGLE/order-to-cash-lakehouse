@@ -1,0 +1,60 @@
+# Databricks Asset Bundle: the pipeline Job defined as code.
+# Deploy with the Databricks CLI:  databricks bundle validate && databricks bundle deploy -t dev
+# No-CLI alternative: run notebooks/08_create_job.py inside the workspace (creates the same Job).
+bundle:
+  name: order_to_cash_lakehouse
+
+variables:
+  catalog:
+    description: Unity Catalog catalog that holds bronze/silver/gold/ops
+    default: workspace
+  notify_email:
+    description: Address that receives failure notifications
+    default: ""
+
+targets:
+  dev:
+    mode: development
+    default: true
+    # workspace.host comes from your Databricks CLI profile (never committed).
+
+resources:
+  jobs:
+    o2c_lakehouse_pipeline:
+      name: o2c_lakehouse_pipeline
+      max_concurrent_runs: 1
+      email_notifications:
+        on_failure:
+          - ${var.notify_email}
+      schedule:
+        quartz_cron_expression: "0 0 6 * * ?"
+        timezone_id: UTC
+        pause_status: PAUSED
+      tags:
+        project: order-to-cash-lakehouse
+      # No cluster settings: notebook tasks run on serverless compute.
+      tasks:
+        - task_key: bronze_ingestion
+          notebook_task:
+            notebook_path: ./notebooks/03_bronze_ingestion.py
+            base_parameters: {catalog: "${var.catalog}", run_id: "{{job.run_id}}"}
+        - task_key: silver_transformations
+          depends_on: [{task_key: bronze_ingestion}]
+          notebook_task:
+            notebook_path: ./notebooks/04_silver_transformations.py
+            base_parameters: {catalog: "${var.catalog}", run_id: "{{job.run_id}}"}
+        - task_key: gold_star_schema
+          depends_on: [{task_key: silver_transformations}]
+          notebook_task:
+            notebook_path: ./notebooks/05_gold_star_schema.py
+            base_parameters: {catalog: "${var.catalog}", run_id: "{{job.run_id}}"}
+        - task_key: dq_checks
+          depends_on: [{task_key: gold_star_schema}]
+          notebook_task:
+            notebook_path: ./notebooks/06_dq_and_reconciliation.py
+            base_parameters: {catalog: "${var.catalog}", run_id: "{{job.run_id}}"}
+        - task_key: table_maintenance
+          depends_on: [{task_key: dq_checks}]
+          notebook_task:
+            notebook_path: ./notebooks/07_table_maintenance.py
+            base_parameters: {catalog: "${var.catalog}", run_id: "{{job.run_id}}"}

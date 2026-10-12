@@ -1,0 +1,5 @@
+# Local development and CI only (tests/ run PySpark locally; needs Java 17+).
+# On Databricks, PySpark, pandas, requests and the Databricks SDK come with the runtime.
+pyspark>=4.0,<5
+pandas>=2.2,<3
+pytest>=8.0

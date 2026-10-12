@@ -1,0 +1,30 @@
+# Raw data (Olist is downloaded from Kaggle, never committed)
+data/raw/
+archive/
+*.csv
+# ...except the clearly-labelled simulated batches and exported Gold tables
+!data/simulated/**/*.csv
+!dashboard/**/*.csv
+
+# Secrets
+.env
+.env.*
+*.pem
+.databrickscfg
+
+# Power BI temp files
+~$*.pbix
+*.pbix.tmp
+.pbi/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
