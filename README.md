@@ -1,8 +1,8 @@
 # Order-to-Cash Lakehouse on Databricks
 
-An **order-to-cash-style simulation** built on the Databricks Lakehouse. Raw e-commerce orders, order items, payments, customers and products, plus daily FX rates from a REST API, move through **Bronze → Silver → Gold** layers. Along the way the pipeline runs data-quality rules and quarantines bad rows, loads incrementally without creating duplicates, keeps SCD Type 2 customer history, and writes every run to an audit trail. The Gold star schema is ready for Power BI.
+An **order-to-cash-style simulation** built on the Databricks Lakehouse. Raw e-commerce orders, order items, payments, customers and products, plus daily FX rates from a REST API, move through **Bronze → Silver → Gold** layers. Along the way the pipeline runs data-quality rules and quarantines bad rows, loads incrementally without creating duplicates, keeps SCD Type 2 customer history, and writes every run to an audit trail.
 
-**Tech:** Databricks (Free Edition, serverless) · PySpark · SQL · Delta Lake · Unity Catalog · Auto Loader · REST API (JSON) · Databricks Jobs / Asset Bundles · pytest + GitHub Actions · Power BI
+**Tech:** Databricks (Free Edition, serverless) · PySpark · SQL · Delta Lake · Unity Catalog · Auto Loader · REST API (JSON) · Databricks Jobs · pytest
 
 [![tests](https://github.com/ANISHTWAGLE/order-to-cash-lakehouse/actions/workflows/tests.yml/badge.svg)](https://github.com/ANISHTWAGLE/order-to-cash-lakehouse/actions/workflows/tests.yml)
 
@@ -39,12 +39,11 @@ flowchart LR
   SV --> Q
   SV --> F1 & F2 & D & V
   SV -.-> L & DQ
-  F1 & F2 & D --> PBI[Power BI]
   classDef src fill:#e8f1ff,stroke:#4a78c2
   classDef sim fill:#fff3e0,stroke:#c98a1a
 ```
 
-The pipeline runs as one Databricks Job: `bronze_ingestion → silver_transformations → gold_star_schema → dq_checks → table_maintenance`. The Job runs on serverless compute, emails on failure, and has a daily schedule (created paused).
+The pipeline runs as one Databricks Job: `bronze_ingestion → silver_transformations → gold_star_schema → dq_checks → table_maintenance`. The Job runs on serverless compute, with a failure e-mail address configured (delivery not tested) and a daily schedule (created paused).
 
 ## Data sources
 
@@ -52,7 +51,7 @@ The pipeline runs as one Databricks Job: `bronze_ingestion → silver_transforma
 |---|---|---|
 | Olist Brazilian E-Commerce (Kaggle) | **Real** | Orders, items, payments, customers, products, sellers, and the category translation. About 99k orders from Sep 2016 to Oct 2018. Not committed to the repo. |
 | Frankfurter API (ECB reference rates) | **Real** | BRL→USD daily rates in **one** date-range request. A copy is kept in `data/fx/` in case outbound internet is blocked. |
-| `data/simulated/` | **Simulated** | Written by `tools/generate_simulated_batches.py`. A correction batch (status updates and customer address moves) and a fault batch (duplicate, missing ID, malformed date, late-arriving order, bad status, negative price, orphan item, extra column, renamed column). Every ID starts with `sim`. |
+| `data/simulated/` | **Simulated** | Written by `tools/generate_simulated_batches.py`. A correction batch (status updates and customer address moves) and a fault batch (not yet run on Databricks: duplicate, missing ID, malformed date, late-arriving order, bad status, negative price, orphan item, extra column, renamed column). Every ID starts with `sim`. |
 
 **Scope:** Olist is an e-commerce dataset, **not** an SAP extract. This project simulates the order-to-cash flow (order → items → payment), using item revenue and payment value. It does **not** implement SAP invoicing or cash application.
 
@@ -95,7 +94,7 @@ The rules live in `src/quality_rules.py`. Each is a small named function with py
 | Order status not in the allowed list | Quarantine `invalid_status` |
 | Item or payment whose order is not in Silver | Quarantine `orphan_order_item` / `orphan_order_payment` |
 | Duplicate business key | Keep the latest `_ingested_at` and count the rest in `dq_results` |
-| Columns outside the contract (extra or renamed) | Kept in `_rescued_data` and counted in `dq_results` |
+| Columns outside the contract (extra or renamed) | Kept in `_rescued_data` and counted in `dq_results` (implemented; not yet exercised on Databricks) |
 | Delivered before purchased; delivered without a date | Flagged in `dq_results`, row kept |
 | Item total ≠ payment total per order | Reported as a finding, not forced to match |
 | **Bronze in = Silver merged + quarantined + deduplicated** | Checked for every entity on every run (critical) |
@@ -109,18 +108,17 @@ Counted locally with pandas from the original Kaggle CSVs:
 
 - 99,441 orders, 112,650 order items, 103,886 payments, 32,951 products. No duplicate keys in the source.
 - **775 orders have no items**, and **8 orders are `delivered` but have no delivery date**.
-- **378 orders** have an item total (price + freight) that differs from the payment total by more than 0.01.
-- **610 products have no category**. **2 categories** (`pc_gamer`, `portateis_cozinha_e_preparadores_de_alimentos`) are missing from the translation file.
+- **303 of 98,665 orders** that have both items and payments have an item total (price + freight) that differs from the payment total by more than 0.01. This is measured with exact decimal arithmetic in `ops.dq_results`. An earlier float-based pandas check counted 378, because rounding noise pushed 75 orders that differ by exactly 0.01 over the threshold.
+- **610 products have no category**. **2 categories** (`pc_gamer`, `portateis_cozinha_e_preparadores_de_alimentos`) are missing from the translation file. They cover **13 products**.
 - Payments include **3 `not_defined` types**, **9 zero-value payments** and **2 with 0 instalments**.
 - The products header misspells *length* as `lenght`, which is renamed in Silver.
 - The category translation file starts with a UTF-8 BOM, which is stripped on release.
 
 ## Incremental loading and idempotency
 
-- **Bronze:** Auto Loader (`cloudFiles`, `availableNow`) keeps a checkpoint of the files it has processed, so re-running ingests nothing twice. `COPY INTO` is a built-in fallback.
+- **Bronze:** Auto Loader (`cloudFiles`, `availableNow`) keeps a checkpoint of the files it has processed, so re-running ingests nothing twice. `COPY INTO` is coded as an alternative (the platform check confirmed it works; the pipeline path was not run).
 - **Silver:** each run processes only Bronze rows newer than that entity's watermark. It loads them with `MERGE … WHEN MATCHED AND s._ingested_at > t._ingested_at`, so a correction updates the existing row and a stale or replayed row never rolls data back.
 - **Gold:** facts are rebuilt from Silver with `CREATE OR REPLACE`, which is idempotent and cheap at this size. `dim_customer` is maintained incrementally as SCD2.
-- **Late-arriving data:** a 2016 order arriving in a 2018 batch is inserted, gets the 2016 FX rate, and lands in the 2016 date bucket.
 
 ## Performance
 
@@ -139,18 +137,37 @@ Locally: `pip install -r requirements.txt && pytest`. You need Java 17+. The sam
 
 ## Results
 
-> Only numbers from real runs go here.
+All numbers below come from real runs on Databricks Free Edition (serverless), 12 Oct 2026. The platform check passed all 7 checks (Unity Catalog, Volumes, Auto Loader, `COPY INTO`, outbound FX API, Jobs with task dependencies, SQL warehouse).
 
-| Evidence | Result |
+| Run | What happened | Result |
+|---|---|---|
+| 1. Initial load (months up to 2017-12) | Bronze → Silver → Gold, all 5 Job tasks succeeded in about 19 minutes (bronze 12m 41s, silver 3m, gold 1m 6s, dq 33s) | 45,430 orders and customers, 51,234 items, 47,871 payments, 3,095 sellers, 32,951 products, 71 category translations, 560 FX days. 0 quarantined, 0 deduplicated. Gold: 51,234 item rows, 47,871 payment rows, 44,034 customers |
+| 2. Re-run, same files | No new files released | **0 new Bronze rows for all 7 entities**, Silver "no new bronze rows", Gold identical (51,234 / 47,871 / 44,034). Idempotent |
+| 3. Remaining months (2018) | Only the new monthly files were ingested | +54,011 orders and customers, +61,416 items, +56,015 payments. Totals: **99,441 orders, 112,650 items, 103,886 payments**, equal to the source files. `fx_rate_daily` grew from 494 to 784 days |
+| 4. Simulated correction batch | 20 orders `shipped` → `delivered`, 5 customers moved | `silver.orders`: **20 updated, 0 inserted**. `silver.customers`: **5 updated, 0 inserted**. `dim_customer`: 5 versions closed, 5 opened (96,200 versions, 96,096 current). All 20 corrected orders show `delivered` |
+
+### Reconciliation and quality checks (final full-data run)
+
+- **Bronze in = Silver merged + quarantined + deduplicated**: balanced for every entity on every run.
+- **Gold = Silver**: fact row counts (112,650 / 103,886) and revenue totals match exactly.
+- **All critical checks passed**: no multiplied fact rows, grain unique, no NULL FX rate on any fact row, FX rate positive on all 784 days, exactly one current row per customer (96,096 customers).
+- **Findings reported as warnings, not forced to pass**:
+
+| Finding | Count |
 |---|---|
-| Initial run: rows ingested per entity, Gold built | `<FILL AFTER RUN>` |
-| Re-run of the same files: new Bronze rows | `<FILL AFTER RUN>` (expected 0) |
-| `remaining` batch: only new months ingested | `<FILL AFTER RUN>` |
-| Correction batch: orders updated, dim_customer versions opened | `<FILL AFTER RUN>` (expected 20 updates, 5 new versions) |
-| Fault batch: quarantine by reason | `<FILL AFTER RUN>` |
-| Bronze = Silver + quarantined + deduplicated, every entity | `<FILL AFTER RUN>` |
-| Fact counts and revenue = Silver | `<FILL AFTER RUN>` |
-| OPTIMIZE file counts (bronze.orders before → after) | `<FILL AFTER RUN>` |
+| Orders with no items | 775 |
+| Orders where item total ≠ payment total (> 0.01) | 303 of 98,665 orders that have both |
+| `delivered` orders without a delivery date | 8 |
+| Products whose category has no English translation | 13 (2 categories) |
+| Delivered before purchase | 0 |
+
+### Performance (initial run, OPTIMIZE file counts)
+
+Bronze and Silver tables gained one small file per Auto Loader batch. `OPTIMIZE` compacted them: `bronze.orders` 2 → 1, `bronze.customers` 2 → 1, `silver.orders` 4 → 1, `silver.order_items` 4 → 1, `silver.customers` 3 → 1. Tables with one file stayed at 1.
+
+### Fault batch (local verification only)
+
+The simulated fault batch has **not been run on Databricks yet**. The Silver parsing and rules were executed with local PySpark on all 450k+ real Olist rows (no false quarantines, every entity balanced) and on the simulated fault files. Locally: orders 7 in = 3 merged + 3 quarantined (`missing_key`, `invalid_timestamp`, `invalid_status`) + 1 deduplicated. Items 4 in = 2 merged + 2 quarantined (`negative_value`, `orphan_order_item`). Expected outcomes for each fault are in [`docs/runbook.md`](docs/runbook.md).
 
 Screenshots are in [`docs/screenshots/`](docs/screenshots/).
 
@@ -163,9 +180,9 @@ sql/            validation queries (ROW_NUMBER, LAG, NULL handling) and order-le
 tests/          pytest (runs PySpark locally and in GitHub Actions)
 tools/          simulated-batch generator
 data/           FX fallback JSON and simulated batches (real Olist data is not committed)
-docs/           architecture, data dictionary, source-to-target mapping, runbook, how-to-run, Power BI
-dashboard/      dashboard SQL (and Power BI file once built)
-databricks.yml  the Job as a Databricks Asset Bundle
+docs/           architecture, data dictionary, source-to-target mapping, runbook, how-to-run
+dashboard/      example reporting queries (no dashboard built)
+databricks.yml  the same Job as a Databricks Asset Bundle (written, not deployed)
 ```
 
 ## Limitations
@@ -173,7 +190,7 @@ databricks.yml  the Job as a Databricks Asset Bundle
 - This is an e-commerce dataset modelled as order-to-cash. It is not SAP data and has no invoicing or cash application.
 - The correction and fault batches are **simulated** and clearly labelled.
 - The data is small, so there is no partitioning. Performance numbers come from Free Edition serverless and say nothing about large-scale behaviour.
-- Free Edition limits are recorded by `00_platform_check`: outbound internet, Power BI connectivity and groups available for `GRANT`.
+- Free Edition limits are recorded by `00_platform_check`: outbound internet and serverless-only compute.
 - An orphan item stays in quarantine if its order arrives in a later batch. Reprocessing it is a manual step, described in the runbook.
 
 ## Credit

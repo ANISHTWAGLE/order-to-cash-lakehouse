@@ -51,6 +51,6 @@ Which copy of the duplicate is kept (fault 1) is decided by a hash of the row. B
 
 | Expected | Actual |
 |---|---|
-| `silver.orders`: rows_updated = 20, rows_inserted = 0 | `<FILL AFTER RUN>` |
-| `silver.customers`: rows_updated = 5 | `<FILL AFTER RUN>` |
-| `dim_customer`: 5 versions closed, 5 opened, still exactly one current row per customer | `<FILL AFTER RUN>` |
+| `silver.orders`: rows_updated = 20, rows_inserted = 0 | **20 updated, 0 inserted** (all 20 now `delivered`) |
+| `silver.customers`: rows_updated = 5 | **5 updated, 0 inserted** |
+| `dim_customer`: 5 versions closed, 5 opened, still exactly one current row per customer | **96,200 versions, 96,096 current, 5 closed** |
